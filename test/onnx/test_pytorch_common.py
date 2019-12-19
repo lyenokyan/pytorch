@@ -12,8 +12,9 @@ import torch.autograd.function as function
 
 pytorch_test_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(-1, pytorch_test_dir)
+print (sys.path)
 
-from common_utils import *  # noqa: F401
+from torch.testing._internal.common_utils import *  # noqa: F401
 
 torch.set_default_tensor_type('torch.FloatTensor')
 
