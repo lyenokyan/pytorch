@@ -9,7 +9,7 @@ import torch.distributed as dist
 import torch.distributed.autograd as dist_autograd
 import torch.distributed.rpc as rpc
 import dist_utils
-from dist_utils import dist_init
+from dist_utils import dist_init, wait_until_node_failure
 from rpc_agent_test_fixture import RpcAgentTestFixture
 from torch.testing import FileCheck
 
@@ -118,19 +118,6 @@ def _all_contexts_cleaned_up(timeout_seconds=10):
 
 def noop():
     pass
-
-def wait_until_node_failure(rank):
-    '''
-    Loops until an RPC to the given rank fails. This is used to
-    indicate that the node has failed in unit tests.
-    '''
-    while True:
-        try:
-            rpc.rpc_sync("worker{}".format(rank), noop, args=())
-            time.sleep(0.1)
-        except Exception:
-            break
-
 
 
 # This function creates a dis atugorad context, run rpc_sync on the given ps,

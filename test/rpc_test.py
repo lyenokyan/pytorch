@@ -14,7 +14,7 @@ import torch.distributed.rpc as rpc
 from torch.distributed.rpc import RRef
 from common_utils import load_tests
 import dist_utils
-from dist_utils import dist_init
+from dist_utils import dist_init, wait_until_node_failure
 from torch.distributed.rpc.api import _use_rpc_pickler
 from torch.distributed.rpc.internal import PythonUDF, _internal_rpc_pickler
 from rpc_agent_test_fixture import RpcAgentTestFixture
@@ -1318,6 +1318,36 @@ class RpcTest(RpcAgentTestFixture):
         expected.update(agent_info)
         expected.update(autograd_info)
         self.assertEqual(expected, info)
+
+    @dist_init(clean_shutdown=False)
+    def test_sender_exceptions(self):
+        # This barrier is needed to ensure that some workers do not exit before
+        # others have been brought up, for non ProcessGroupAgent backends.
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="gloo",
+                init_method=self.init_method,
+                rank=self.rank,
+                world_size=self.world_size,
+            )
+        dist.barrier()
+
+        if self.rank == 0:
+            dst_rank = (self.rank + 1) % self.world_size
+            self_worker = "worker{}".format(self.rank)
+            dst_worker = "worker{}".format(dst_rank)
+            # allow destination worker to exit without joining
+            wait_until_node_failure(dst_rank)
+            fut = rpc.rpc_async(dst_worker, torch.add, args=(torch.ones(1), 3))
+            error_str = (
+                "Encountered exception in ProcessGroupAgent::enqueueSend"
+                if self.rpc_backend == rpc.backend_registry.BackendType.PROCESS_GROUP
+                else "{}: Error in response from {}".format(self_worker, dst_worker)
+            )
+            with self.assertRaisesRegex(RuntimeError, error_str):
+                fut.wait()
+        else:
+            pass  # exit all other nodes
 
     @dist_init(setup_rpc=False)
     @requires_process_group_agent("PROCESS_GROUP rpc backend specific test, skip")
