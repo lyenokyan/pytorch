@@ -1,5 +1,6 @@
 #include <torch/csrc/autograd/record_function.h>
 #include <torch/csrc/autograd/function.h>
+#include <torch/csrc/autograd/profiler.h>
 #include <torch/csrc/utils/memory.h>
 #include <cstdlib>
 #include <random>
@@ -137,6 +138,18 @@ bool hasNonSampledCallbacks() {
   return manager().hasNonSampledCallbacks();
 }
 
+void runBeforeCallbacks(RecordFunction* rf, const std::string& funcName) {
+  TORCH_INTERNAL_ASSERT(
+      rf != nullptr, "Passed in RecordFunction cannot be null.");
+  if (hasCallbacks()) {
+    auto run_samples = shouldRunSampledCallbacks();
+    if (run_samples || hasNonSampledCallbacks()) {
+      rf->setRunSampled(run_samples);
+      rf->before(funcName);
+    }
+  }
+}
+
 void RecordFunction::before(const char* name, int64_t sequence_nr) {
   if (!hasCallbacks()) {
     return;
@@ -185,6 +198,13 @@ void RecordFunction::processCallbacks() {
   }
 }
 
+void RecordFunction::setThreadId() {
+  TORCH_INTERNAL_ASSERT(
+      torch::autograd::profiler::thread_id != 0,
+      "Can only call RecordFunction::setThreadId after RecordFunction::before has been run in this thread.");
+  threadId_ = torch::autograd::profiler::thread_id;
+}
+
 RecordFunction::~RecordFunction() {
   end();
 }
@@ -197,7 +217,14 @@ void RecordFunction::end() {
       }
     }
 
-    AT_ASSERT(thread_local_func_ == this, name_, ": must be top of stack");
+    // In the case that RecordFunction::end is called from a different thread,
+    // thread_local_func will not be this, so assert that we have overridden the
+    // thread id (by ensuring it is nonzero) and thread_local_func is null.
+    TORCH_INTERNAL_ASSERT(
+        (thread_local_func_ == this) ||
+            (thread_local_func_ == nullptr && threadId_ != 0),
+        name_,
+        ": must be top of stack");
     thread_local_func_ = parent_;
     initialized_ = false;
   }

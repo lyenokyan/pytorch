@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ATen/core/ivalue.h>
+#include <torch/csrc/autograd/profiler.h>
 
 namespace torch {
 
@@ -9,7 +10,7 @@ namespace utils {
 // FutureError inherits from std::exception, it can return const char* or
 // std::string error message
 class TORCH_API FutureError final : public std::exception {
-public:
+ public:
   FutureError(std::string errorMsg) : errorMsg_(std::move(errorMsg)) {}
 
   FutureError() = default;
@@ -18,7 +19,7 @@ public:
     return errorMsg_.c_str();
   }
 
-private:
+ private:
   std::string errorMsg_;
 };
 
@@ -33,8 +34,7 @@ class TORCH_API Future final {
 
   Future() = default;
 
-  Future(T value)
-  : completed_(true), value_(std::move(value)) {}
+  Future(T value) : completed_(true), value_(std::move(value)), rf_(nullptr) {}
 
   const T& wait() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -69,6 +69,10 @@ class TORCH_API Future final {
     std::vector<Callback> cbs;
     cbs.swap(callbacks_);
     lock.unlock();
+    // if recording, run end callbacks.
+    if (rf_) {
+      rf_->end();
+    }
     // There is no need to protect callbacks_ with the lock.
     // Once completed_ is set to true, no one can add new callback to the
     // list. pass value_, error_ for callback to easily check state.
@@ -123,6 +127,15 @@ class TORCH_API Future final {
     }
     callbacks_.push_back(callback);
   }
+  // Attach a RecordFunction shared_ptr to this Future, to
+  // persist the lifetime of the RecordFunction for the duration of the future.
+  // This allows the future to control when this RecordFunction's callbacks are
+  // run, ensuring that the RPC the future is associated with is profiled
+  // appropriately.
+  void attachRecordFunction(
+      std::shared_ptr<torch::autograd::profiler::RecordFunction> rf) {
+    rf_ = std::move(rf);
+  }
 
  private:
   mutable std::mutex mutex_;
@@ -131,7 +144,8 @@ class TORCH_API Future final {
   std::vector<Callback> callbacks_;
   T value_;
   c10::optional<FutureError> error_;
+  std::shared_ptr<torch::autograd::profiler::RecordFunction> rf_;
 };
 
-}
-} // namespace torch::utils
+} // namespace utils
+} // namespace torch

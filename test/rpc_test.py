@@ -16,7 +16,7 @@ from common_utils import load_tests
 import dist_utils
 from dist_utils import dist_init
 from torch.distributed.rpc.api import _use_rpc_pickler
-from torch.distributed.rpc.internal import PythonUDF, _internal_rpc_pickler
+from torch.distributed.rpc.internal import PythonUDF, _internal_rpc_pickler, RPCExecMode
 from rpc_agent_test_fixture import RpcAgentTestFixture
 
 def requires_process_group_agent(message=""):
@@ -532,6 +532,53 @@ class RpcTest(RpcAgentTestFixture):
             kwargs={"a": n, "b": n + 1, "c": n + 2},
         )
         self.assertEqual(ret, my_function(n, n + 1, n + 2))
+
+    def _profiler_test_with_rpc(self, rpc_exec_mode, func, args):
+        dst = (self.rank + 1) % self.world_size
+        # only run profiler on rank 0.
+        if self.rank in {0}:
+            with torch.autograd.profiler.profile() as prof:
+                if rpc_exec_mode == RPCExecMode.SYNC:
+                    rpc.rpc_sync("worker{}".format(dst), func, args=args)
+                elif rpc_exec_mode == RPCExecMode.ASYNC:
+                    fut = rpc.rpc_async("worker{}".format(dst), func, args=args)
+                    fut.wait()
+                else:
+                    self.assertTrue(rpc_exec_mode == RPCExecMode.REMOTE)
+                    rref = rpc.remote("worker{}".format(dst), func, args=args)
+                    rref.to_here()
+                    # Hack: We need to wait for the instance to be created on
+                    # the owner, and get back a positive confirmation.
+                    # Calling to_here does not ensure that we have finished
+                    # processing the Owner's confirmation of this RRef.
+                    # time.sleep(1)
+
+            events = prof.function_events
+            rpc_event = [event for event in events if rpc_exec_mode.value in event.name][0]
+            # the sender, dest worker, function run, and type of RPC should all be recorded.
+            self_worker_name = "worker{}".format(self.rank)
+            dst_worker_name = "worker{}".format(dst)
+            self.assertTrue(self_worker_name in rpc_event.name)
+            self.assertTrue(dst_worker_name in rpc_event.name)
+            self.assertTrue(func.__name__ in rpc_event.name)
+            self.assertTrue(rpc_exec_mode.value in rpc_event.name)
+            self.assertEqual(rpc_event.count, 1)
+            print(prof.key_averages())
+
+    @dist_init
+    def test_profiler_with_sync_rpc(self):
+        self._profiler_test_with_rpc(RPCExecMode.SYNC, my_sleep_func, args=(1,))
+        self._profiler_test_with_rpc(RPCExecMode.SYNC, torch.add, args=(torch.ones(1), torch.ones(1)))
+
+    @dist_init
+    def test_profiler_with_async_rpc(self):
+        self._profiler_test_with_rpc(RPCExecMode.ASYNC, my_sleep_func, args=(1,))
+        self._profiler_test_with_rpc(RPCExecMode.ASYNC, torch.add, args=(torch.ones(1), torch.ones(1)))
+
+    @dist_init
+    def test_profiler_with_remote(self):
+        self._profiler_test_with_rpc(RPCExecMode.REMOTE, my_sleep_func, args=(1,))
+        # self._profiler_test_with_rpc(RPCExecMode.REMOTE, torch.add, args=(torch.ones(1), torch.ones(1)))
 
     @dist_init
     def test_py_class_constructor(self):
